@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **refactor(store):** Update `BrokerStatsManager::compute_initial_delay_to_next_minute` to use `TimeUtils::current_millis` for minute-boundary scheduling delay calculation ([#6582](https://github.com/mxsm/rocketmq-rust/issues/6582))
 - **refactor(remoting/tools):** Return references from `TopicStatsTable::get_offset_table` and add `into_offset_table`/`get_offset_table_mut` to avoid unnecessary `HashMap` cloning in topic status flows
 - **refactor(common):** Rename foundational `MessageTrait` methods to the idiomatic Rust naming: `get_property` to `property` and `get_property_ref` to `property_ref` (other getters like `get_topic`, `get_flag`, etc.. will be renamed in subsequent commits)
 - **refactor(client):** Refactor `default_mq_producer::start` in `default_mq_producer.rs` removing repeated `as_mut().unwrap()`([#5576](https://github.com/mxsm/rocketmq-rust/issues/5576))

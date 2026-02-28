@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use cheetah_string::CheetahString;
 use dashmap::DashMap;
@@ -33,6 +31,7 @@ use rocketmq_common::common::stats::stats_item::StatsItem;
 use rocketmq_common::common::stats::stats_item_set::StatsItemSet;
 use rocketmq_common::common::stats::Stats;
 use rocketmq_common::common::topic::TopicValidator;
+use rocketmq_common::TimeUtils::current_millis;
 use rocketmq_rust::schedule::simple_scheduler::ScheduledTaskManager;
 use tokio::time::Duration;
 use tracing::info;
@@ -167,8 +166,11 @@ impl BrokerStatsManager {
 
     /// Compute delay to next minute boundary
     fn compute_initial_delay_to_next_minute() -> Duration {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now = current_millis();
+        Self::compute_initial_delay_to_next_minute_from(now)
+    }
 
+    fn compute_initial_delay_to_next_minute_from(now: u64) -> Duration {
         let next_minute = ((now / 60000) + 1) * 60000;
         let delay_ms = next_minute - now;
 
@@ -1114,6 +1116,18 @@ mod tests {
     fn split_account_stat_key_splits_correctly() {
         let parts = split_account_stat_key("part1|part2|part3|part4|part5");
         assert_eq!(parts, vec!["part1", "part2", "part3", "part4", "part5"]);
+    }
+
+    #[test]
+    fn compute_initial_delay_to_next_minute_from_returns_delay_to_next_boundary() {
+        let delay = BrokerStatsManager::compute_initial_delay_to_next_minute_from(61_234);
+        assert_eq!(delay, Duration::from_millis(58_766));
+    }
+
+    #[test]
+    fn compute_initial_delay_to_next_minute_from_full_minute_returns_60_seconds() {
+        let delay = BrokerStatsManager::compute_initial_delay_to_next_minute_from(120_000);
+        assert_eq!(delay, Duration::from_secs(60));
     }
 
     #[tokio::test]
