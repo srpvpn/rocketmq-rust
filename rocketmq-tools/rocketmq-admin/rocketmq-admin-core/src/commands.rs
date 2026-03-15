@@ -23,8 +23,12 @@ mod controller;
 mod export;
 mod ha;
 mod lite;
+mod message;
 mod namesrv;
 mod offset;
+mod producer;
+mod queue;
+mod stats;
 mod target;
 mod topic;
 
@@ -123,6 +127,11 @@ pub enum Commands {
     Lite(lite::LiteCommands),
 
     #[command(subcommand)]
+    #[command(about = "Message commands")]
+    #[command(name = "message")]
+    Message(message::MessageCommands),
+
+    #[command(subcommand)]
     #[command(about = "Name server commands")]
     #[command(name = "nameserver")]
     NameServer(namesrv::NameServerCommands),
@@ -131,6 +140,21 @@ pub enum Commands {
     #[command(about = "Offset commands")]
     #[command(name = "offset")]
     Offset(offset::OffsetCommands),
+
+    #[command(subcommand)]
+    #[command(about = "Producer commands")]
+    #[command(name = "producer")]
+    Producer(producer::ProducerCommands),
+
+    #[command(subcommand)]
+    #[command(about = "Queue commands")]
+    #[command(name = "queue")]
+    Queue(queue::QueueCommands),
+
+    #[command(subcommand)]
+    #[command(about = "Stats commands")]
+    #[command(name = "stats")]
+    Stats(stats::StatsCommands),
 
     #[command(subcommand)]
     #[command(about = "Topic commands")]
@@ -152,8 +176,12 @@ impl CommandExecute for Commands {
             Commands::Export(value) => value.execute(rpc_hook).await,
             Commands::HA(value) => value.execute(rpc_hook).await,
             Commands::Lite(value) => value.execute(rpc_hook).await,
+            Commands::Message(value) => value.execute(rpc_hook).await,
             Commands::NameServer(value) => value.execute(rpc_hook).await,
             Commands::Offset(value) => value.execute(rpc_hook).await,
+            Commands::Producer(value) => value.execute(rpc_hook).await,
+            Commands::Queue(value) => value.execute(rpc_hook).await,
+            Commands::Stats(value) => value.execute(rpc_hook).await,
             Commands::Topic(value) => value.execute(rpc_hook).await,
             Commands::Show(value) => value.execute(rpc_hook).await,
         }
@@ -326,6 +354,11 @@ impl CommandExecute for ClassificationTablePrint {
             },
             Command {
                 category: "Consumer",
+                command: "getConsumerConfig",
+                remark: "Get consumer config by subscription group name.",
+            },
+            Command {
+                category: "Consumer",
                 command: "updateSubGroup",
                 remark: "Update consumer sub group.",
             },
@@ -416,6 +449,41 @@ impl CommandExecute for ClassificationTablePrint {
                 remark: "Trigger Lite Dispatch.",
             },
             Command {
+                category: "Message",
+                command: "checkMsgSendRT",
+                remark: "Check message send response time.",
+            },
+            Command {
+                category: "Message",
+                command: "decodeMessageId",
+                remark: "Decode unique message ID.",
+            },
+            Command {
+                category: "Message",
+                command: "dumpCompactionLog",
+                remark: "Parse compaction log to message.",
+            },
+            Command {
+                category: "Message",
+                command: "printMessage",
+                remark: "Print Message Detail.",
+            },
+            Command {
+                category: "Message",
+                command: "printMsgByQueue",
+                remark: "Print Message Detail by queueId.",
+            },
+            Command {
+                category: "Message",
+                command: "queryMsgByKey",
+                remark: "Query Message by Key.",
+            },
+            Command {
+                category: "Message",
+                command: "sendMessage",
+                remark: "Send a message.",
+            },
+            Command {
                 category: "NameServer",
                 command: "addWritePerm",
                 remark: "Add write perm of broker in all name server.",
@@ -447,8 +515,38 @@ impl CommandExecute for ClassificationTablePrint {
             },
             Command {
                 category: "Offset",
+                command: "cloneGroupOffset",
+                remark: "Clone offset from other group.",
+            },
+            Command {
+                category: "Offset",
+                command: "getConsumerStatus",
+                remark: "Get consumer status from client.",
+            },
+            Command {
+                category: "Offset",
                 command: "resetOffsetByTime",
                 remark: "Reset consumer group offsets to a specific timestamp (no restart required).",
+            },
+            Command {
+                category: "Producer",
+                command: "producer",
+                remark: "Query producer's instances, connection, status, etc.",
+            },
+            Command {
+                category: "Queue",
+                command: "checkRocksdbCqWriteProgress",
+                remark: "Check if rocksdb cq is same as file cq.",
+            },
+            Command {
+                category: "Queue",
+                command: "queryCq",
+                remark: "Query cq command.",
+            },
+            Command {
+                category: "Stats",
+                command: "statsAll",
+                remark: "Topic and Consumer tps stats.",
             },
             Command {
                 category: "Topic",

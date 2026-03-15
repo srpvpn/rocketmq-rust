@@ -159,6 +159,10 @@ mod defaults {
         true
     }
 
+    pub fn enable_register_producer() -> bool {
+        true
+    }
+
     pub fn register_name_server_period() -> u64 {
         1000 * 30
     }
@@ -544,6 +548,11 @@ pub struct BrokerConfig {
     #[serde(default)]
     pub enable_slave_acting_master: bool,
 
+    /// Enable producer registration. When false with reject_transaction_message=true,
+    /// only existing producers can send heartbeats, new producers cannot register.
+    #[serde(default = "defaults::enable_register_producer")]
+    pub enable_register_producer: bool,
+
     #[serde(default)]
     pub reject_transaction_message: bool,
 
@@ -768,6 +777,14 @@ pub struct BrokerConfig {
 
     #[serde(default = "defaults::broker_heartbeat_interval")]
     pub broker_heartbeat_interval: u64,
+
+    /// Enable fast channel event processing by maintaining channel-to-group mapping
+    ///
+    /// When enabled, channel close events use O(1) lookup instead of O(n) traversal
+    /// of all consumer groups, providing 50-100x performance improvement in high
+    /// connection scenarios (1000+ consumer groups).
+    #[serde(default)]
+    pub enable_fast_channel_event_process: bool,
 }
 
 impl Default for BrokerConfig {
@@ -813,6 +830,7 @@ impl Default for BrokerConfig {
             cluster_topic_enable: true,
             revive_queue_num: 8,
             enable_slave_acting_master: false,
+            enable_register_producer: true,
             reject_transaction_message: false,
             enable_detail_stat: true,
             flush_consumer_offset_interval: 1000 * 5,
@@ -888,6 +906,7 @@ impl Default for BrokerConfig {
             broker_heartbeat_interval: 1000,
             recall_message_enable: true,
             allow_recall_when_broker_not_writeable: false,
+            enable_fast_channel_event_process: false,
         }
     }
 }

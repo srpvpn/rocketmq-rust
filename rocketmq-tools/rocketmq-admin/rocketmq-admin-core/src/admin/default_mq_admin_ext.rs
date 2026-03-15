@@ -43,6 +43,7 @@ use rocketmq_remoting::protocol::body::acl_info::AclInfo;
 use rocketmq_remoting::protocol::body::broker_body::broker_member_group::BrokerMemberGroup;
 use rocketmq_remoting::protocol::body::broker_body::cluster_info::ClusterInfo;
 use rocketmq_remoting::protocol::body::broker_replicas_info::BrokerReplicasInfo;
+use rocketmq_remoting::protocol::body::check_rocksdb_cqwrite_progress_response_body::CheckRocksdbCqWriteResult;
 use rocketmq_remoting::protocol::body::consume_message_directly_result::ConsumeMessageDirectlyResult;
 use rocketmq_remoting::protocol::body::consumer_connection::ConsumerConnection;
 use rocketmq_remoting::protocol::body::consumer_running_info::ConsumerRunningInfo;
@@ -251,6 +252,45 @@ impl DefaultMQAdminExt {
             .update_user_with_user_info(broker_addr, user_info)
             .await
     }
+
+    pub async fn pull_message_from_queue(
+        &self,
+        broker_addr: &str,
+        mq: &MessageQueue,
+        sub_expression: &str,
+        offset: i64,
+        max_nums: i32,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<rocketmq_client_rust::consumer::pull_result::PullResult> {
+        self.default_mqadmin_ext_impl
+            .pull_message_from_queue(broker_addr, mq, sub_expression, offset, max_nums, timeout_millis)
+            .await
+    }
+
+    pub async fn query_message_by_key(
+        &self,
+        cluster_name: Option<CheetahString>,
+        topic: CheetahString,
+        key: CheetahString,
+        max_num: i32,
+        begin_timestamp: i64,
+        end_timestamp: i64,
+        key_type: CheetahString,
+        last_key: Option<CheetahString>,
+    ) -> rocketmq_error::RocketMQResult<rocketmq_client_rust::base::query_result::QueryResult> {
+        self.default_mqadmin_ext_impl
+            .query_message_by_key(
+                cluster_name,
+                topic,
+                key,
+                max_num,
+                begin_timestamp,
+                end_timestamp,
+                key_type,
+                last_key,
+            )
+            .await
+    }
 }
 
 impl Default for DefaultMQAdminExt {
@@ -372,7 +412,9 @@ impl MQAdminExt for DefaultMQAdminExt {
         addr: CheetahString,
         group: CheetahString,
     ) -> rocketmq_error::RocketMQResult<SubscriptionGroupConfig> {
-        todo!()
+        self.default_mqadmin_ext_impl
+            .examine_subscription_group_config(addr, group)
+            .await
     }
 
     async fn examine_topic_stats(
@@ -388,7 +430,7 @@ impl MQAdminExt for DefaultMQAdminExt {
     }
 
     async fn fetch_all_topic_list(&self) -> rocketmq_error::RocketMQResult<TopicList> {
-        todo!()
+        self.default_mqadmin_ext_impl.fetch_all_topic_list().await
     }
 
     async fn fetch_topics_by_cluster(&self, cluster_name: CheetahString) -> rocketmq_error::RocketMQResult<TopicList> {
@@ -409,7 +451,9 @@ impl MQAdminExt for DefaultMQAdminExt {
         broker_addr: Option<CheetahString>,
         timeout_millis: Option<u64>,
     ) -> rocketmq_error::RocketMQResult<ConsumeStats> {
-        todo!()
+        self.default_mqadmin_ext_impl
+            .examine_consume_stats(consumer_group, topic, cluster_name, broker_addr, timeout_millis)
+            .await
     }
 
     async fn examine_broker_cluster_info(&self) -> rocketmq_error::RocketMQResult<ClusterInfo> {
@@ -558,7 +602,9 @@ impl MQAdminExt for DefaultMQAdminExt {
         group: CheetahString,
         client_addr: CheetahString,
     ) -> rocketmq_error::RocketMQResult<HashMap<CheetahString, HashMap<MessageQueue, u64>>> {
-        todo!()
+        self.default_mqadmin_ext_impl
+            .get_consume_status(topic, group, client_addr)
+            .await
     }
 
     async fn create_or_update_order_conf(
@@ -571,7 +617,7 @@ impl MQAdminExt for DefaultMQAdminExt {
     }
 
     async fn query_topic_consume_by_who(&self, topic: CheetahString) -> rocketmq_error::RocketMQResult<GroupList> {
-        todo!()
+        self.default_mqadmin_ext_impl.query_topic_consume_by_who(topic).await
     }
 
     async fn query_topics_by_consumer(&self, group: CheetahString) -> rocketmq_error::RocketMQResult<TopicList> {
@@ -1117,28 +1163,55 @@ impl MQAdminExt for DefaultMQAdminExt {
 
     async fn search_offset(
         &self,
-        _broker_addr: CheetahString,
-        _topic_name: CheetahString,
-        _queue_id: i32,
-        _timestamp: u64,
-        _timeout_millis: u64,
+        broker_addr: CheetahString,
+        topic_name: CheetahString,
+        queue_id: i32,
+        timestamp: u64,
+        timeout_millis: u64,
     ) -> rocketmq_error::RocketMQResult<u64> {
-        unimplemented!("search_offset not implemented yet (deprecated)")
+        self.default_mqadmin_ext_impl
+            .search_offset(broker_addr, topic_name, queue_id, timestamp, timeout_millis)
+            .await
+    }
+
+    async fn min_offset(
+        &self,
+        broker_addr: CheetahString,
+        message_queue: MessageQueue,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<i64> {
+        self.default_mqadmin_ext_impl
+            .min_offset(broker_addr, message_queue, timeout_millis)
+            .await
+    }
+
+    async fn max_offset(
+        &self,
+        broker_addr: CheetahString,
+        message_queue: MessageQueue,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<i64> {
+        self.default_mqadmin_ext_impl
+            .max_offset(broker_addr, message_queue, timeout_millis)
+            .await
     }
 
     async fn check_rocksdb_cq_write_progress(
         &self,
-        _broker_addr: CheetahString,
-        _topic: CheetahString,
-    ) -> rocketmq_error::RocketMQResult<CheetahString> {
-        unimplemented!("check_rocksdb_cq_write_progress not implemented yet")
+        broker_addr: CheetahString,
+        topic: CheetahString,
+        check_store_time: i64,
+    ) -> rocketmq_error::RocketMQResult<CheckRocksdbCqWriteResult> {
+        self.default_mqadmin_ext_impl
+            .check_rocksdb_cq_write_progress(broker_addr, topic, check_store_time)
+            .await
     }
 
     async fn get_all_producer_info(
         &self,
-        _broker_addr: CheetahString,
+        broker_addr: CheetahString,
     ) -> rocketmq_error::RocketMQResult<ProducerTableInfo> {
-        unimplemented!("get_all_producer_info not implemented yet")
+        self.default_mqadmin_ext_impl.get_all_producer_info(broker_addr).await
     }
     #[allow(deprecated)]
     async fn delete_topic_in_broker_concurrent(
@@ -1194,11 +1267,13 @@ impl MQAdminExt for DefaultMQAdminExt {
 
     async fn view_broker_stats_data(
         &self,
-        _broker_addr: CheetahString,
-        _stats_name: CheetahString,
-        _stats_key: CheetahString,
+        broker_addr: CheetahString,
+        stats_name: CheetahString,
+        stats_key: CheetahString,
     ) -> rocketmq_error::RocketMQResult<BrokerStatsData> {
-        unimplemented!("view_broker_stats_data not implemented yet")
+        self.default_mqadmin_ext_impl
+            .view_broker_stats_data(broker_addr, stats_name, stats_key)
+            .await
     }
 
     async fn fetch_consume_stats_in_broker(
@@ -1232,14 +1307,16 @@ impl MQAdminExt for DefaultMQAdminExt {
 
     async fn query_consume_queue(
         &self,
-        _broker_addr: CheetahString,
-        _topic: CheetahString,
-        _queue_id: i32,
-        _index: u64,
-        _count: i32,
-        _consumer_group: CheetahString,
+        broker_addr: CheetahString,
+        topic: CheetahString,
+        queue_id: i32,
+        index: u64,
+        count: i32,
+        consumer_group: CheetahString,
     ) -> rocketmq_error::RocketMQResult<QueryConsumeQueueResponseBody> {
-        unimplemented!("query_consume_queue not implemented yet")
+        self.default_mqadmin_ext_impl
+            .query_consume_queue(broker_addr, topic, queue_id, index, count, consumer_group)
+            .await
     }
 
     async fn update_and_get_group_read_forbidden(

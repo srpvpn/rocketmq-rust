@@ -24,7 +24,12 @@ use crate::admin::mq_admin_ext_async::MQAdminExt;
 use crate::admin::mq_admin_ext_async_inner::MQAdminExtInnerImpl;
 use crate::base::client_config::ClientConfig;
 use crate::common::admin_tool_result::AdminToolResult;
+use crate::consumer::consumer_impl::pull_request_ext::PullResultExt;
+use crate::consumer::pull_callback::PullCallback;
+use crate::consumer::pull_status::PullStatus;
 use crate::factory::mq_client_instance::MQClientInstance;
+use crate::implementation::communication_mode::CommunicationMode;
+use crate::implementation::mq_client_api_impl::MQClientAPIImpl;
 use crate::implementation::mq_client_manager::MQClientManager;
 use cheetah_string::CheetahString;
 use rand::seq::IndexedRandom;
@@ -32,12 +37,14 @@ use rocketmq_common::common::base::plain_access_config::PlainAccessConfig;
 use rocketmq_common::common::base::service_state::ServiceState;
 use rocketmq_common::common::config::TopicConfig;
 use rocketmq_common::common::constant::PermName;
+use rocketmq_common::common::message::message_decoder;
 use rocketmq_common::common::message::message_enum::MessageRequestMode;
 use rocketmq_common::common::message::message_ext::MessageExt;
 use rocketmq_common::common::message::message_queue::MessageQueue;
 use rocketmq_common::common::mix_all;
 use rocketmq_common::common::mix_all::DLQ_GROUP_TOPIC_PREFIX;
 use rocketmq_common::common::mix_all::RETRY_GROUP_TOPIC_PREFIX;
+use rocketmq_common::common::sys_flag::pull_sys_flag::PullSysFlag;
 #[allow(deprecated)]
 use rocketmq_common::common::tools::broker_operator_result::BrokerOperatorResult;
 #[allow(deprecated)]
@@ -52,6 +59,7 @@ use rocketmq_remoting::protocol::body::acl_info::AclInfo;
 use rocketmq_remoting::protocol::body::broker_body::broker_member_group::BrokerMemberGroup;
 use rocketmq_remoting::protocol::body::broker_body::cluster_info::ClusterInfo;
 use rocketmq_remoting::protocol::body::broker_replicas_info::BrokerReplicasInfo;
+use rocketmq_remoting::protocol::body::check_rocksdb_cqwrite_progress_response_body::CheckRocksdbCqWriteResult;
 use rocketmq_remoting::protocol::body::consume_message_directly_result::ConsumeMessageDirectlyResult;
 use rocketmq_remoting::protocol::body::consumer_connection::ConsumerConnection;
 use rocketmq_remoting::protocol::body::consumer_running_info::ConsumerRunningInfo;
@@ -73,7 +81,11 @@ use rocketmq_remoting::protocol::body::topic::topic_list::TopicList;
 use rocketmq_remoting::protocol::body::topic_info_wrapper::TopicConfigSerializeWrapper;
 use rocketmq_remoting::protocol::body::user_info::UserInfo;
 use rocketmq_remoting::protocol::header::elect_master_response_header::ElectMasterResponseHeader;
+use rocketmq_remoting::protocol::header::get_consume_stats_request_header::GetConsumeStatsRequestHeader;
 use rocketmq_remoting::protocol::header::get_meta_data_response_header::GetMetaDataResponseHeader;
+use rocketmq_remoting::protocol::header::pull_message_request_header::PullMessageRequestHeader;
+use rocketmq_remoting::protocol::header::query_topic_consume_by_who_request_header::QueryTopicConsumeByWhoRequestHeader;
+use rocketmq_remoting::protocol::header::view_broker_stats_data_request_header::ViewBrokerStatsDataRequestHeader;
 use rocketmq_remoting::protocol::heartbeat::subscription_data::SubscriptionData;
 use rocketmq_remoting::protocol::route::topic_route_data::TopicRouteData;
 use rocketmq_remoting::protocol::static_topic::topic_queue_mapping_detail::TopicQueueMappingDetail;
@@ -264,6 +276,130 @@ impl DefaultMQAdminExtImpl {
         self.update_user(broker_addr, username, password, user_type, user_status)
             .await
     }
+
+    pub async fn pull_message_from_queue(
+        &self,
+        broker_addr: &str,
+        mq: &MessageQueue,
+        sub_expression: &str,
+        offset: i64,
+        max_nums: i32,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<crate::consumer::pull_result::PullResult> {
+        let sys_flag = PullSysFlag::build_sys_flag(false, false, true, false);
+
+        let request_header = PullMessageRequestHeader {
+            consumer_group: CheetahString::from_static_str(mix_all::TOOLS_CONSUMER_GROUP),
+            topic: mq.topic().clone(),
+            queue_id: mq.queue_id(),
+            queue_offset: offset,
+            max_msg_nums: max_nums,
+            sys_flag: sys_flag as i32,
+            commit_offset: 0,
+            suspend_timeout_millis: 0,
+            sub_version: 0,
+            subscription: Some(CheetahString::from(sub_expression)),
+            expression_type: None,
+            max_msg_bytes: None,
+            request_source: None,
+            proxy_forward_client_id: None,
+            topic_request: None,
+        };
+
+        struct NoopPullCallback;
+        impl PullCallback for NoopPullCallback {
+            async fn on_success(&mut self, _pull_result: PullResultExt) {}
+            fn on_exception(&mut self, _e: Box<dyn std::error::Error + Send>) {}
+        }
+
+        let api_impl = self.client_instance.as_ref().unwrap().get_mq_client_api_impl();
+
+        let mut result = MQClientAPIImpl::pull_message(
+            api_impl,
+            CheetahString::from(broker_addr),
+            request_header,
+            timeout_millis,
+            CommunicationMode::Sync,
+            NoopPullCallback,
+        )
+        .await?
+        .ok_or_else(|| rocketmq_error::RocketMQError::Internal("pull_message returned None in sync mode".into()))?;
+
+        if result.pull_result.pull_status == PullStatus::Found {
+            if let Some(mut message_binary) = result.message_binary.take() {
+                let msg_vec = message_decoder::decodes_batch(&mut message_binary, true, true);
+                result.pull_result.msg_found_list = Some(msg_vec.into_iter().map(ArcMut::new).collect());
+            }
+        }
+
+        Ok(result.pull_result)
+    }
+
+    pub async fn query_message_by_key(
+        &self,
+        cluster_name: Option<CheetahString>,
+        topic: CheetahString,
+        key: CheetahString,
+        max_num: i32,
+        begin_timestamp: i64,
+        end_timestamp: i64,
+        _key_type: CheetahString,
+        _last_key: Option<CheetahString>,
+    ) -> rocketmq_error::RocketMQResult<crate::base::query_result::QueryResult> {
+        let route_topic = cluster_name.unwrap_or_else(|| topic.clone());
+        let topic_route_data = self
+            .examine_topic_route_info(route_topic.clone())
+            .await?
+            .ok_or_else(|| {
+                rocketmq_error::RocketMQError::Internal(format!("Topic route not found for: {}", route_topic))
+            })?;
+
+        let mut message_list: Vec<MessageExt> = Vec::new();
+        let mut index_last_update_timestamp: u64 = 0;
+
+        let api_impl = self.client_instance.as_ref().unwrap().get_mq_client_api_impl();
+        let timeout = self.timeout_millis.as_millis() as u64;
+
+        for broker_data in &topic_route_data.broker_datas {
+            let broker_addr = match broker_data.select_broker_addr() {
+                Some(addr) => addr,
+                None => continue,
+            };
+
+            let request_header =
+                rocketmq_remoting::protocol::header::query_message_request_header::QueryMessageRequestHeader {
+                    topic: topic.clone(),
+                    key: key.clone(),
+                    max_num,
+                    begin_timestamp,
+                    end_timestamp,
+                    topic_request_header: None,
+                };
+
+            match MQClientAPIImpl::query_message(&api_impl, &broker_addr, request_header, timeout).await {
+                Ok(Some((response_header, body))) => {
+                    if let Some(mut body_bytes) = body {
+                        let msgs = message_decoder::decodes_batch(&mut body_bytes, true, true);
+                        message_list.extend(msgs);
+                    }
+                    if response_header.index_last_update_timestamp as u64 > index_last_update_timestamp {
+                        index_last_update_timestamp = response_header.index_last_update_timestamp as u64;
+                    }
+                }
+                Ok(None) => {
+                    // No messages found on this broker, continue
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to query message by key from broker {}: {}", broker_addr, e);
+                }
+            }
+        }
+
+        Ok(crate::base::query_result::QueryResult::new(
+            index_last_update_timestamp,
+            message_list,
+        ))
+    }
 }
 
 #[allow(unused_variables)]
@@ -431,7 +567,12 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
         addr: CheetahString,
         group: CheetahString,
     ) -> rocketmq_error::RocketMQResult<SubscriptionGroupConfig> {
-        todo!()
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .get_subscription_group_config(&addr, group, self.timeout_millis.as_millis() as u64)
+            .await
     }
 
     async fn examine_topic_stats(
@@ -447,7 +588,12 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
     }
 
     async fn fetch_all_topic_list(&self) -> rocketmq_error::RocketMQResult<TopicList> {
-        todo!()
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .get_all_topic_list_from_name_server(self.timeout_millis.as_millis() as u64)
+            .await
     }
 
     async fn fetch_topics_by_cluster(&self, cluster_name: CheetahString) -> rocketmq_error::RocketMQResult<TopicList> {
@@ -471,15 +617,80 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
         broker_addr: Option<CheetahString>,
         timeout_millis: Option<u64>,
     ) -> rocketmq_error::RocketMQResult<ConsumeStats> {
-        todo!()
+        let timeout = timeout_millis.unwrap_or(self.timeout_millis.as_millis() as u64);
+        let topic_str = topic.clone().unwrap_or_default();
+
+        if let Some(addr) = broker_addr {
+            let request_header = GetConsumeStatsRequestHeader {
+                consumer_group,
+                topic: topic_str,
+                topic_request_header: None,
+            };
+            return self
+                .client_instance
+                .as_ref()
+                .unwrap()
+                .get_mq_client_api_impl()
+                .get_consume_stats(&addr, request_header, timeout)
+                .await;
+        }
+
+        let retry_topic: CheetahString = rocketmq_common::common::mix_all::get_retry_topic(&consumer_group).into();
+        let topic_route = self
+            .client_instance
+            .as_ref()
+            .unwrap()
+            .mq_client_api_impl
+            .as_ref()
+            .unwrap()
+            .get_topic_route_info_from_name_server(&retry_topic, timeout)
+            .await?;
+
+        let mut result = ConsumeStats::new();
+
+        if let Some(route_data) = topic_route {
+            for bd in &route_data.broker_datas {
+                if let Some(master_addr) = bd.broker_addrs().get(&rocketmq_common::common::mix_all::MASTER_ID) {
+                    let request_header = GetConsumeStatsRequestHeader {
+                        consumer_group: consumer_group.clone(),
+                        topic: topic_str.clone(),
+                        topic_request_header: None,
+                    };
+                    let cs = self
+                        .client_instance
+                        .as_ref()
+                        .unwrap()
+                        .get_mq_client_api_impl()
+                        .get_consume_stats(master_addr, request_header, timeout)
+                        .await?;
+
+                    result.get_offset_table_mut().extend(cs.offset_table);
+                    let new_tps = result.get_consume_tps() + cs.consume_tps;
+                    result.set_consume_tps(new_tps);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     async fn check_rocksdb_cq_write_progress(
         &self,
-        _broker_addr: CheetahString,
-        _topic: CheetahString,
-    ) -> rocketmq_error::RocketMQResult<CheetahString> {
-        unimplemented!("check_rocksdb_cq_write_progress not implemented yet")
+        broker_addr: CheetahString,
+        topic: CheetahString,
+        check_store_time: i64,
+    ) -> rocketmq_error::RocketMQResult<CheckRocksdbCqWriteResult> {
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .check_rocksdb_cq_write_progress(
+                &broker_addr,
+                topic,
+                check_store_time,
+                self.timeout_millis.as_millis() as u64,
+            )
+            .await
     }
 
     async fn examine_broker_cluster_info(&self) -> rocketmq_error::RocketMQResult<ClusterInfo> {
@@ -569,9 +780,14 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
 
     async fn get_all_producer_info(
         &self,
-        _broker_addr: CheetahString,
+        broker_addr: CheetahString,
     ) -> rocketmq_error::RocketMQResult<ProducerTableInfo> {
-        unimplemented!("get_all_producer_info not implemented yet")
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .get_all_producer_info(broker_addr.as_str(), self.timeout_millis.as_millis() as u64)
+            .await
     }
 
     async fn get_name_server_address_list(&self) -> Vec<CheetahString> {
@@ -722,7 +938,36 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
         group: CheetahString,
         client_addr: CheetahString,
     ) -> rocketmq_error::RocketMQResult<HashMap<CheetahString, HashMap<MessageQueue, u64>>> {
-        todo!()
+        let topic_route_data = self.examine_topic_route_info(topic.clone()).await?;
+        if let Some(route_data) = topic_route_data {
+            if !route_data.broker_datas.is_empty() {
+                if let Some(addr) = route_data.broker_datas[0].select_broker_addr() {
+                    let result = self
+                        .client_instance
+                        .as_ref()
+                        .unwrap()
+                        .get_mq_client_api_impl()
+                        .invoke_broker_to_get_consumer_status(
+                            addr.as_str(),
+                            topic,
+                            group,
+                            client_addr,
+                            self.timeout_millis.as_millis() as u64,
+                        )
+                        .await?;
+                    let converted: HashMap<CheetahString, HashMap<MessageQueue, u64>> = result
+                        .into_iter()
+                        .map(|(k, v)| {
+                            let inner: HashMap<MessageQueue, u64> =
+                                v.into_iter().map(|(mq, off)| (mq, off as u64)).collect();
+                            (k, inner)
+                        })
+                        .collect();
+                    return Ok(converted);
+                }
+            }
+        }
+        Ok(HashMap::new())
     }
 
     async fn create_or_update_order_conf(
@@ -735,7 +980,35 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
     }
 
     async fn query_topic_consume_by_who(&self, topic: CheetahString) -> rocketmq_error::RocketMQResult<GroupList> {
-        todo!()
+        let topic_route = self
+            .client_instance
+            .as_ref()
+            .unwrap()
+            .mq_client_api_impl
+            .as_ref()
+            .unwrap()
+            .get_topic_route_info_from_name_server(&topic, self.timeout_millis.as_millis() as u64)
+            .await?;
+
+        if let Some(route_data) = topic_route {
+            for bd in &route_data.broker_datas {
+                if let Some(master_addr) = bd.broker_addrs().get(&rocketmq_common::common::mix_all::MASTER_ID) {
+                    let request_header = QueryTopicConsumeByWhoRequestHeader {
+                        topic: topic.clone(),
+                        topic_request_header: None,
+                    };
+                    return self
+                        .client_instance
+                        .as_ref()
+                        .unwrap()
+                        .get_mq_client_api_impl()
+                        .query_topic_consume_by_who(master_addr, request_header, self.timeout_millis.as_millis() as u64)
+                        .await;
+                }
+            }
+        }
+
+        Ok(GroupList::default())
     }
 
     async fn query_topics_by_consumer(&self, group: CheetahString) -> rocketmq_error::RocketMQResult<TopicList> {
@@ -1457,11 +1730,17 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
 
     async fn view_broker_stats_data(
         &self,
-        _broker_addr: CheetahString,
-        _stats_name: CheetahString,
-        _stats_key: CheetahString,
+        broker_addr: CheetahString,
+        stats_name: CheetahString,
+        stats_key: CheetahString,
     ) -> rocketmq_error::RocketMQResult<BrokerStatsData> {
-        unimplemented!("view_broker_stats_data not implemented yet")
+        let request_header = ViewBrokerStatsDataRequestHeader { stats_name, stats_key };
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .view_broker_stats_data(&broker_addr, request_header, self.timeout_millis.as_millis() as u64)
+            .await
     }
 
     async fn fetch_consume_stats_in_broker(
@@ -1503,14 +1782,27 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
 
     async fn query_consume_queue(
         &self,
-        _broker_addr: CheetahString,
-        _topic: CheetahString,
-        _queue_id: i32,
-        _index: u64,
-        _count: i32,
-        _consumer_group: CheetahString,
+        broker_addr: CheetahString,
+        topic: CheetahString,
+        queue_id: i32,
+        index: u64,
+        count: i32,
+        consumer_group: CheetahString,
     ) -> rocketmq_error::RocketMQResult<QueryConsumeQueueResponseBody> {
-        unimplemented!("query_consume_queue not implemented yet")
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .query_consume_queue(
+                &broker_addr,
+                topic,
+                queue_id,
+                index as i64,
+                count,
+                consumer_group,
+                self.timeout_millis.as_millis() as u64,
+            )
+            .await
     }
 
     async fn update_and_get_group_read_forbidden(
@@ -1761,12 +2053,54 @@ impl MQAdminExt for DefaultMQAdminExtImpl {
 
     async fn search_offset(
         &self,
-        _broker_addr: CheetahString,
-        _topic_name: CheetahString,
-        _queue_id: i32,
-        _timestamp: u64,
-        _timeout_millis: u64,
+        broker_addr: CheetahString,
+        topic_name: CheetahString,
+        queue_id: i32,
+        timestamp: u64,
+        timeout_millis: u64,
     ) -> rocketmq_error::RocketMQResult<u64> {
-        unimplemented!("search_offset not implemented yet (deprecated)")
+        let mq = MessageQueue::from_parts(&topic_name, "", queue_id);
+        let offset = self
+            .client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .search_offset_by_timestamp(
+                broker_addr.as_str(),
+                &mq,
+                timestamp as i64,
+                rocketmq_common::common::boundary_type::BoundaryType::Lower,
+                timeout_millis,
+            )
+            .await?;
+        Ok(offset as u64)
+    }
+
+    async fn min_offset(
+        &self,
+        broker_addr: CheetahString,
+        message_queue: MessageQueue,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<i64> {
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .get_min_offset(broker_addr.as_str(), &message_queue, timeout_millis)
+            .await
+    }
+
+    async fn max_offset(
+        &self,
+        broker_addr: CheetahString,
+        message_queue: MessageQueue,
+        timeout_millis: u64,
+    ) -> rocketmq_error::RocketMQResult<i64> {
+        self.client_instance
+            .as_ref()
+            .unwrap()
+            .get_mq_client_api_impl()
+            .get_max_offset(broker_addr.as_str(), &message_queue, timeout_millis)
+            .await
     }
 }
