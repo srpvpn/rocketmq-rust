@@ -2042,7 +2042,7 @@ impl DefaultMQProducerImpl {
         self.ensure_not_delayed_for_transactional(&msg)?;
 
         // ignore DelayTimeLevel parameter
-        if msg.get_delay_time_level() != 0 {
+        if msg.delay_time_level() != 0 {
             MessageAccessor::clear_property(&mut msg, MessageConst::PROPERTY_DELAY_TIME_LEVEL);
         }
         Validators::check_message(Some(&msg), self.producer_config.as_ref())?;
@@ -2109,9 +2109,13 @@ impl DefaultMQProducerImpl {
         local_transaction_state: LocalTransactionState,
     ) -> rocketmq_error::RocketMQResult<()> {
         let id = if let Some(ref offset_msg_id) = send_result.offset_msg_id {
-            MessageDecoder::decode_message_id(offset_msg_id)
+            MessageDecoder::decode_message_id(offset_msg_id).map_err(|e| {
+                rocketmq_error::RocketMQError::IllegalArgument(format!("Failed to decode message ID: {}", e))
+            })?
         } else {
-            MessageDecoder::decode_message_id(send_result.msg_id.as_ref().unwrap())
+            MessageDecoder::decode_message_id(send_result.msg_id.as_ref().unwrap()).map_err(|e| {
+                rocketmq_error::RocketMQError::IllegalArgument(format!("Failed to decode message ID: {}", e))
+            })?
         };
         let transaction_id = send_result.transaction_id.clone();
         let queue = self
